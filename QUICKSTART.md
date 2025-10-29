@@ -26,6 +26,41 @@ That's it! Results will be saved to `search_results.json`
 
 ---
 
+## 🔔 Price Drop Monitoring (Booking.com)
+
+1) Fill credentials and notifications in `config.py`:
+```python
+BOOKING_EMAIL = "your-email@example.com"
+BOOKING_PASSWORD = "your-password"
+ENABLE_EMAIL = True
+SMTP_HOST = "smtp.example.com"
+SMTP_PORT = 587
+SMTP_USERNAME = "smtp-user"
+SMTP_PASSWORD = "smtp-pass"
+EMAIL_FROM = "alerts@example.com"
+EMAIL_TO = ["you@example.com"]
+# Optional SMS via Twilio
+ENABLE_SMS = False
+TWILIO_ACCOUNT_SID = "..."
+TWILIO_AUTH_TOKEN = "..."
+TWILIO_FROM_NUMBER = "+10000000000"
+TWILIO_TO_NUMBERS = ["+19999999999"]
+```
+
+2) Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+3) Run the monitor:
+```bash
+python run_monitor.py
+```
+
+The script will: log in to Booking.com, read your upcoming cancellable reservations, re-query prices for the same dates and hotel, and notify you if a lower price is found.
+
+---
+
 ## 📝 Alternative: Use Directly in Python
 
 ```python

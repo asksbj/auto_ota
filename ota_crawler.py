@@ -14,6 +14,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 import os
 import json
+import re
 
 
 class OTACrawler:
@@ -44,6 +45,13 @@ class OTACrawler:
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36')
+        # Allow persistent user profile if configured
+        try:
+            import config as _cfg
+            if getattr(_cfg, 'CHROME_USER_DATA_DIR', ''):
+                chrome_options.add_argument(f"--user-data-dir={getattr(_cfg, 'CHROME_USER_DATA_DIR')}")
+        except Exception:
+            pass
         
         # ✨ 让 Selenium 自动处理 ChromeDriver（Selenium 4.6+）
         print("Setting up ChromeDriver...")
@@ -51,6 +59,221 @@ class OTACrawler:
         driver.maximize_window()
         print("✓ ChromeDriver ready!")
         return driver
+    
+    def login_booking(self, email, password, selectors=None):
+        """
+        Log into Booking.com account.
+        """
+        try:
+            self.driver.get((selectors or {}).get('login_page_url', 'https://account.booking.com/sign-in'))
+            time.sleep(2)
+            self._handle_popups()
+
+            email_input = self.wait.until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, (selectors or {}).get('email_input', 'input[type="email"]')))
+            )
+            email_input.clear()
+            email_input.send_keys(email)
+
+            cont_btn = self.wait.until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, (selectors or {}).get('continue_button', 'button[type="submit"]')))
+            )
+            cont_btn.click()
+            time.sleep(1.5)
+
+            pwd_input = self.wait.until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, (selectors or {}).get('password_input', 'input[type="password"]')))
+            )
+            pwd_input.clear()
+            pwd_input.send_keys(password)
+
+            submit_btn = self.wait.until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, (selectors or {}).get('continue_button', 'button[type="submit"]')))
+            )
+            submit_btn.click()
+            time.sleep(3)
+            return True
+        except Exception as e:
+            print(f"Booking login failed: {str(e)}")
+            self._take_screenshot("booking_login_error")
+            return False
+
+    def is_booking_logged_in(self, selectors=None):
+        """Return True if the current session appears logged in to Booking.com."""
+        try:
+            reservations_url = (selectors or {}).get('reservations_page_url', 'https://secure.booking.com/myreservations.html')
+            trips_url = (selectors or {}).get('trips_page_url', 'https://secure.booking.com/mytrips.html')
+
+            def find_cards_on_current_page():
+                css_candidates = [
+                    (selectors or {}).get('reservation_card', '[data-testid="booking-card"]'),
+                    (selectors or {}).get('reservation_card_alt', '[data-testid*="booking"]'),
+                ]
+                for css in css_candidates:
+                    try:
+                        found = self.driver.find_elements(By.CSS_SELECTOR, css)
+                        if found:
+                            return found
+                    except Exception:
+                        continue
+                return []
+
+            cards = []
+            for url in (reservations_url, trips_url):
+                self.driver.get(url)
+                time.sleep(3)
+                self._handle_popups()
+                cards = find_cards_on_current_page()
+                if cards:
+                    break
+
+            # If reservation cards are present, we are logged in
+            if len(cards) > 0:
+                return True
+
+            # If login form is visible, not logged in
+            email_inputs = self.driver.find_elements(By.CSS_SELECTOR, (selectors or {}).get('email_input', 'input[type="email"]'))
+            pwd_inputs = self.driver.find_elements(By.CSS_SELECTOR, (selectors or {}).get('password_input', 'input[type="password"]'))
+            if email_inputs or pwd_inputs:
+                return False
+
+            # Heuristic: presence of account menu might indicate logged-in
+            try:
+                self.driver.find_element(By.CSS_SELECTOR, '[data-testid="header-myaccount-menu"]')
+                return True
+            except Exception:
+                pass
+
+            # Try trips page as alternative
+            trips_url = (selectors or {}).get('trips_page_url', 'https://secure.booking.com/mytrips.html')
+            self.driver.get(trips_url)
+            time.sleep(2)
+            self._handle_popups()
+            # If account menu is visible on trips page, treat as logged in
+            try:
+                self.driver.find_element(By.CSS_SELECTOR, '[data-testid="header-myaccount-menu"]')
+                return True
+            except Exception:
+                pass
+
+        except Exception as e:
+            print(f"Error detecting login status: {str(e)}")
+        return False
+
+    def is_booking_logged_in_light(self, selectors=None):
+        """
+        Lightweight login check: do NOT navigate or refresh.
+        Heuristics:
+          - URL contains mytrips/myreservations/account
+          - Presence of header account menu
+          - Presence of reservation card on current DOM
+        """
+        try:
+            url = self.driver.current_url or ""
+            # Explicitly treat sign-in and OTP pages as NOT logged in
+            if "account.booking.com/sign-in" in url:
+                return False
+            if "/otp/email-code" in url:
+                return False
+
+            # Consider logged in when on trips or reservations sections
+            if any(k in url for k in ["mytrips", "myreservations"]):
+                return True
+
+            # Account menu present?
+            try:
+                if self.driver.find_elements(By.CSS_SELECTOR, '[data-testid="header-myaccount-menu"]'):
+                    return True
+            except Exception:
+                pass
+
+            # Reservation card visible on current DOM?
+            css_candidates = [
+                (selectors or {}).get('reservation_card', '[data-testid="booking-card"]'),
+                (selectors or {}).get('reservation_card_alt', '[data-testid*="booking"]'),
+            ]
+            for css in css_candidates:
+                try:
+                    if self.driver.find_elements(By.CSS_SELECTOR, css):
+                        return True
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"Light login check error: {str(e)}")
+        return False
+
+    def fetch_booking_reservations(self, selectors=None):
+        """
+        Fetch reservations from Booking.com 'My Reservations' page.
+        Returns a list of dictionaries per reservation.
+        """
+        results = []
+        try:
+            self.driver.get((selectors or {}).get('reservations_page_url', 'https://secure.booking.com/myreservations.html'))
+            time.sleep(3)
+            self._handle_popups()
+
+            cards = self.driver.find_elements(
+                By.CSS_SELECTOR,
+                (selectors or {}).get('reservation_card', '[data-testid="booking-card"]')
+            )
+            print(f"Found {len(cards)} reservations")
+
+            for idx, card in enumerate(cards):
+                try:
+                    res = self._parse_booking_reservation_card(card, selectors or {})
+                    results.append(res)
+                except Exception as e:
+                    print(f"Failed to parse reservation card {idx}: {str(e)}")
+                    continue
+
+        except Exception as e:
+            print(f"Error fetching reservations: {str(e)}")
+            self._take_screenshot("reservations_error")
+
+        return results
+
+    def _parse_booking_reservation_card(self, card, selectors):
+        """Parse a single reservation card element into structured data."""
+        def text_or_default(css, default="N/A"):
+            try:
+                return card.find_element(By.CSS_SELECTOR, css).text.strip()
+            except Exception:
+                return default
+
+        hotel_name = text_or_default(selectors.get('hotel_name', '[data-testid="property-name"]'))
+        room_type = text_or_default(selectors.get('room_type', '[data-testid="room-type"]'))
+        date_range = text_or_default(selectors.get('date_range', '[data-testid="stay-dates"]'))
+        price_total = text_or_default(selectors.get('price_total', '[data-testid="total-price"]'))
+        cancellation_policy = text_or_default(selectors.get('cancellation_policy', '[data-testid="cancellation-policy"]'))
+        reservation_status = text_or_default(selectors.get('reservation_status', '[data-testid="reservation-status"]'))
+
+        check_in = ""
+        check_out = ""
+        m = re.findall(r"(\d{1,2}\s\w+\s\d{4})", date_range)
+        if len(m) >= 2:
+            check_in, check_out = m[0], m[1]
+
+        is_cancellable = False
+        cancellable_until = ""
+        if cancellation_policy and ('free cancellation' in cancellation_policy.lower() or '取消' in cancellation_policy):
+            is_cancellable = True
+            m2 = re.search(r"until\s+([^.,;]+)", cancellation_policy, re.IGNORECASE)
+            if m2:
+                cancellable_until = m2.group(1).strip()
+
+        return {
+            'hotel_name': hotel_name,
+            'room_type': room_type,
+            'date_range': date_range,
+            'check_in': check_in,
+            'check_out': check_out,
+            'price_total': price_total,
+            'cancellation_policy': cancellation_policy,
+            'cancellable_until': cancellable_until,
+            'is_cancellable': is_cancellable,
+            'status': reservation_status,
+        }
     
     def search_booking_com(self, destination, check_in, check_out, adults=2, rooms=1):
         """
